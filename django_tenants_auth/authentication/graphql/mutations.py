@@ -172,6 +172,8 @@ class AuthMutation:
                 user_id=data.get("user_id"),
                 email=data.get("email"),
                 email_sent=data.get("email_sent", False),
+                company_name=data.get("company_name"),
+                subdomain=data.get("subdomain"),
             )
         except AuthenticationError as e:
             raise Exception(str(e))
@@ -184,6 +186,8 @@ class AuthMutation:
         info: Info,
         user_id: strawberry.ID,
         code: str,
+        company_name: str,   
+        subdomain: str,      
     ) -> RegistrationCompleteType:
         """
         Step 2: Verify email code and finalise tenant creation.
@@ -192,6 +196,8 @@ class AuthMutation:
             data = AuthenticationService.verify_email_and_complete_registration(
                 user_id=str(user_id),
                 code=code,
+                company_name=company_name,
+                subdomain=subdomain,
             )
             return RegistrationCompleteType(
                 status=data["status"],

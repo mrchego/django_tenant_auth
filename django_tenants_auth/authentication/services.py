@@ -96,24 +96,16 @@ class AuthenticationService:
                 }
         
         with transaction.atomic():
-            # Create user (inactive until verified)
             user = User.objects.create_user(
                 email=email,
                 password=password,
                 is_active=False,
             )
-            # Set is_verified separately to avoid manager conflicts
             user.is_verified = False
             user.save(update_fields=['is_verified'])
-            
-            # Store tenant registration data temporarily
-            user.registration_data = {
-                "company_name": company_name,
-                "subdomain": subdomain,
-            }
-            user.save()
-            
-            # Send verification email
+
+            # No registration_data stored on user
+
             success = AuthenticationService._send_verification_email(user, 'registration')
             
             return {
@@ -122,7 +114,11 @@ class AuthenticationService:
                 "user_id": str(user.id),
                 "email": email,
                 "email_sent": success,
+                # Return the registration info so frontend can hold it
+                "company_name": company_name,
+                "subdomain": subdomain,
             }
+            
     
     @staticmethod
     def _send_verification_email(user: User, purpose: str) -> bool:
@@ -155,6 +151,8 @@ class AuthenticationService:
         *,
         user_id: str,
         code: str,
+        company_name: str,   # new parameter
+        subdomain: str,      # new parameter
     ) -> Dict[str, Any]:
         """
         Step 2: Verify email and complete registration.
@@ -208,11 +206,6 @@ class AuthenticationService:
             user.is_verified = True
             user.is_active = True
             user.save()
-            
-            # Get registration data
-            registration_data = user.registration_data or {}
-            company_name = registration_data.get('company_name', f"{user.email.split('@')[0]}'s Company")
-            subdomain = registration_data.get('subdomain', user.email.split('@')[0])
             
             # Create tenant
             tenant, domain = provision_tenant(

@@ -6,12 +6,13 @@ from django_tenants_auth.rbac.graphql.types import UserRoleInfoType
 
 @strawberry.type
 class VerificationResponseType:
-    """Response for email verification."""
     status: str
     message: str
     user_id: Optional[strawberry.ID] = None
     email: Optional[str] = None
     email_sent: Optional[bool] = None
+    company_name: Optional[str] = None
+    subdomain: Optional[str] = None
 
 
 @strawberry.type
