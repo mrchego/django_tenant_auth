@@ -21,7 +21,8 @@ from django_tenants_auth.authentication.email_service import EmailService
 import logging
 logger = logging.getLogger(__name__)
 from django.db import transaction as db_transaction
-
+from django.core.management import call_command
+from django.db import connection
 class AuthenticationService:
     """Service layer for authentication operations."""
     
@@ -216,6 +217,44 @@ class AuthenticationService:
                 is_superuser=True,
                 is_staff=True,
             )
+            
+            # Force creation of employees tables (idempotent)
+            with schema_context(subdomain):
+                from django.db import connection
+                from django.apps import apps
+
+                Employee = apps.get_model('employees', 'Employee')
+                Department = apps.get_model('employees', 'Department')
+
+                # Check if tables exist before trying to create
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT to_regclass('employees_department');")
+                    dept_exists = cursor.fetchone()[0] is not None
+                    cursor.execute("SELECT to_regclass('employees_employee');")
+                    emp_exists = cursor.fetchone()[0] is not None
+
+                if not dept_exists or not emp_exists:
+                    try:
+                        with transaction.atomic():   # <--- savepoint
+                            with connection.schema_editor() as schema_editor:
+                                if not dept_exists:
+                                    schema_editor.create_model(Department)
+                                if not emp_exists:
+                                    schema_editor.create_model(Employee)
+                    except Exception as e:
+                        # Savepoint rolls back, outer transaction continues
+                        logger.error(f"Error creating employee tables: {e}")
+
+                # Ensure migration record is set (ignore if already exists)
+                try:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "INSERT INTO django_migrations (app, name, applied) "
+                            "VALUES ('employees', '0001_initial', NOW())"
+                        )
+                except Exception:
+                    pass  # already exists, no problem
+
             
             # Set up RBAC
             with schema_context(tenant.schema_name):

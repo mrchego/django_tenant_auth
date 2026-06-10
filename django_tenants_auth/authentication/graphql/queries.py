@@ -1,3 +1,5 @@
+from typing import Optional
+
 import strawberry
 from strawberry.types import Info
 from django_tenants_auth.authentication.decorators import login_required
@@ -7,26 +9,31 @@ from django_tenants_auth.authentication.graphql.types import (
     CurrentUserResponseType,
     UserType,
 )
-
+from django_tenants_auth.tenants.models import Tenant
 
 @strawberry.type
 class AuthQuery:
     
     @strawberry.field
     @login_required
-    def me(self, info: Info) -> CurrentUserResponseType:
+    def me(
+        self,
+        info: Info,
+        tenant_slug: Optional[str] = None,
+    ) -> CurrentUserResponseType:
         """
         Get current authenticated user's full information.
         
-        This includes:
-        - User details
-        - Current tenant
-        - Available tenants
-        - Roles in current tenant
-        - Permissions in current tenant
+        If `tenantSlug` is provided, it will override the current tenant
+        (the user must be a member of that tenant).
         """
         user = info.context.request.user
-        tenant = info.context.request.tenant
+        
+        if tenant_slug:
+            # Use the explicitly provided tenant
+            tenant = user.tenants.get(slug=tenant_slug)
+        else:
+            tenant = info.context.request.tenant
         
         return AuthenticationService.get_current_user_info(user, tenant)
     

@@ -54,10 +54,7 @@ class DepartmentAdmin(TimeStampedModelAdmin):
     )
     
     def employee_count(self, obj):
-        """Display number of employees in department."""
-        count = obj.employees.count()
-        url = reverse('admin:employees_employee_changelist') + f'?department__id__exact={obj.id}'
-        return format_html('<a href="{}">{} employees</a>', url, count)
+        return obj.employees.count()
     employee_count.short_description = 'Employees'
     
     def employee_count_display(self, obj):
@@ -168,16 +165,13 @@ class EmployeeAdmin(TimeStampedModelAdmin):
     def has_user_account(self, obj):
         """Display whether employee has a user account."""
         if obj.user:
-            return format_html(
-                '<span style="color: green;">✓</span> {}',
-                obj.user.email
-            )
-        return format_html('<span style="color: red;">✗</span> No account')
+            return f"✓ {obj.user.email}"
+        return "✗ No account"
     has_user_account.short_description = 'User Account'
-    
+
     def has_user_account_display(self, obj):
         """Readonly display for user account status."""
-        return bool(obj.user)
+        return "Yes" if obj.user else "No"
     has_user_account_display.short_description = 'Has User Account'
     
     def get_queryset(self, request):

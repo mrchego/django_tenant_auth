@@ -219,9 +219,13 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
 
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    
+    "django_tenants_auth.authentication.middleware.JWTAuthenticationMiddleware",
 
     # tenant access middleware MUST come after auth
+    "django_tenants_auth.tenants.middleware.TenantSlugHeaderMiddleware",
     "tenant_users.tenants.middleware.TenantAccessMiddleware",
+    
 
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
