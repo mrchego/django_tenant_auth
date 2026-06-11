@@ -337,83 +337,130 @@ class AuthenticationService:
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
     ) -> Dict[str, Any]:
+
         """
-        Login user and return comprehensive tenant information.
-        
-        This method handles the transition between public and tenant schemas
-        properly, ensuring RBAC queries run in the correct tenant schema.
+        Login user and return tenant-aware authentication data.
         """
-        # Authenticate user (runs in public schema)
-        user = authenticate(email=email, password=password)
-        
+
+        # ==========================================================
+        # STEP 1
+        # Authenticate from PUBLIC schema
+        # ==========================================================
+
+        user = authenticate(
+            email=email,
+            password=password
+        )
+
+
         if not user:
-            # Log failed attempt in public schema
+
             LoginAttempt.objects.create(
                 email=email,
-                tenant_slug=tenant_slug or '',
+                tenant_slug=tenant_slug or "",
                 status=LoginAttempt.FAILED,
                 ip_address=ip_address,
-                user_agent=user_agent or '',
+                user_agent=user_agent or "",
                 failure_reason="Invalid credentials",
             )
-            raise AuthenticationError("Invalid credentials")
-        
-        # Check if email is verified
+
+            raise AuthenticationError(
+                "Invalid credentials"
+            )
+
+
+        # ==========================================================
+        # STEP 2
+        # Account checks
+        # ==========================================================
+
         if not user.is_verified:
-            # Log pending verification in public schema
+
             LoginAttempt.objects.create(
                 user=user,
                 email=email,
                 status=LoginAttempt.PENDING_VERIFICATION,
                 ip_address=ip_address,
-                user_agent=user_agent or '',
+                user_agent=user_agent or "",
                 failure_reason="Email not verified",
             )
+
             raise AuthenticationError(
-                "Email not verified. Please verify your email first.",
+                "Email not verified",
                 code="EMAIL_NOT_VERIFIED"
             )
-        
-        # Check if user is active
+
+
         if not user.is_active:
-            # Log blocked attempt in public schema
+
             LoginAttempt.objects.create(
                 user=user,
                 email=email,
                 status=LoginAttempt.BLOCKED,
                 ip_address=ip_address,
-                user_agent=user_agent or '',
-                failure_reason="Account is deactivated",
+                user_agent=user_agent or "",
+                failure_reason="Account disabled",
             )
-            raise AuthenticationError("Account is deactivated")
-        
-        # Get all tenants for user (query runs in public schema)
-        user_tenants = user.tenants.all()
-        
-        if not user_tenants.exists():
-            # Log failed attempt in public schema
-            LoginAttempt.objects.create(
-                user=user,
-                email=email,
-                status=LoginAttempt.FAILED,
-                ip_address=ip_address,
-                user_agent=user_agent or '',
-                failure_reason="No tenant association",
-            )
-            raise AuthenticationError("User is not associated with any tenant")
-        
-        # Determine current tenant (query runs in public schema)
-        try:
-            if tenant_slug:
-                current_tenant = user_tenants.get(slug=tenant_slug)
-            else:
-                current_tenant = user_tenants.first()
-        except Tenant.DoesNotExist:
+
             raise AuthenticationError(
-                f"Tenant '{tenant_slug}' not found or not accessible"
+                "Account is deactivated"
             )
-        
-        # Generate tokens (runs in public schema - RefreshToken model is in public)
+
+
+        # ==========================================================
+        # STEP 3
+        # Get tenant memberships
+        #
+        # IMPORTANT:
+        # remove public tenant
+        # ==========================================================
+
+        user_tenants = (
+            user.tenants
+            .exclude(
+                schema_name="public"
+            )
+        )
+
+
+        if not user_tenants.exists():
+
+            raise AuthenticationError(
+                "User is not associated with any tenant"
+            )
+
+
+        # ==========================================================
+        # STEP 4
+        # Pick active tenant
+        # ==========================================================
+
+        try:
+
+            if tenant_slug:
+
+                current_tenant = user_tenants.get(
+                    slug=tenant_slug
+                )
+
+            else:
+
+                current_tenant = user_tenants.first()
+
+
+        except Tenant.DoesNotExist:
+
+            raise AuthenticationError(
+                f"Tenant '{tenant_slug}' not found"
+            )
+
+
+        # ==========================================================
+        # STEP 5
+        # Create JWT tokens
+        # public schema
+        # ==========================================================
+
         tokens = AuthenticationService.generate_jwt_tokens(
             user,
             device_info={
@@ -421,93 +468,248 @@ class AuthenticationService:
                 "user_agent": user_agent,
             }
         )
-        
-        # Get roles and permissions for current tenant
-        # IMPORTANT: Use schema_context to switch to tenant schema for RBAC queries
+
+
+        # ==========================================================
+        # STEP 6
+        # Load RBAC from tenant schema
+        # ==========================================================
+
         try:
-            with db_transaction.atomic():          # <--- savepoint
-                with schema_context(current_tenant.schema_name):
-                    permissions_data = RBACService.get_user_permissions(
-                        user, current_tenant
+
+            with db_transaction.atomic():
+
+                with schema_context(
+                    current_tenant.schema_name
+                ):
+
+
+                    # IMPORTANT:
+                    # reload user inside tenant schema
+
+                    tenant_user = User.objects.get(
+                        id=user.id
                     )
-                    roles_data = RBACService.get_user_roles(
-                        user, current_tenant
-                    )
-        except Exception as e:
-            logger.error(
-                f"Error fetching roles for tenant {current_tenant.schema_name}: {str(e)}"
-            )
-            permissions_data = {"permissions": []}
-            roles_data = []
-        
-        # Build available tenants list with their respective roles
-        available_tenants = []
-        for tenant in user_tenants:
-            try:
-                # Switch to each tenant's schema to get their specific roles
-                with db_transaction.atomic():
-                    with schema_context(tenant.schema_name):
-                        tenant_roles = RBACService.get_user_roles(user, tenant)
-                        tenant_permissions = RBACService.get_user_permissions(
-                            user, tenant
+
+
+                    roles_data = (
+                        RBACService.get_user_roles(
+                            tenant_user,
+                            current_tenant
                         )
-                    
-                    available_tenants.append({
-                        "id": str(tenant.id),
-                        "name": tenant.name,
-                        "slug": tenant.slug,
-                        "schema_name": tenant.schema_name,
-                        "roles": [r["role_slug"] for r in tenant_roles],
-                        "permissions": tenant_permissions.get("permissions", []),
-                        "is_current": tenant.id == current_tenant.id,
-                    })
+                    )
+
+
+                    permissions_data = (
+                        RBACService.get_user_permissions(
+                            tenant_user,
+                            current_tenant
+                        )
+                    )
+
+
+        except Exception as e:
+
+            logger.exception(
+                f"RBAC error: {e}"
+            )
+
+            roles_data = []
+
+            permissions_data = {
+                "permissions": []
+            }
+
+
+
+        # ==========================================================
+        # STEP 7
+        # Build tenant switch list
+        # ==========================================================
+
+        available_tenants = []
+
+
+        for tenant in user_tenants:
+
+            try:
+
+                with db_transaction.atomic():
+
+                    with schema_context(
+                        tenant.schema_name
+                    ):
+
+
+                        tenant_user = User.objects.get(
+                            id=user.id
+                        )
+
+
+                        tenant_roles = (
+                            RBACService.get_user_roles(
+                                tenant_user,
+                                tenant
+                            )
+                        )
+
+
+                        tenant_permissions = (
+                            RBACService.get_user_permissions(
+                                tenant_user,
+                                tenant
+                            )
+                        )
+
+
+                        available_tenants.append(
+                            {
+                                "id": str(tenant.id),
+
+                                "name": tenant.name,
+
+                                "slug": tenant.slug,
+
+                                "schema_name":
+                                    tenant.schema_name,
+
+
+                                "roles": [
+                                    role["role_slug"]
+                                    for role in tenant_roles
+                                ],
+
+
+                                "permissions":
+                                    tenant_permissions.get(
+                                        "permissions",
+                                        []
+                                    ),
+
+
+                                "is_current":
+                                    tenant.id ==
+                                    current_tenant.id,
+                            }
+                        )
+
+
             except Exception as e:
-                # If a specific tenant has schema issues, include it with minimal info
-                logger.error(
-                    f"Error fetching data for tenant {tenant.schema_name}: {str(e)}"
+
+                logger.exception(
+                    f"Tenant loading failed {tenant.schema_name}: {e}"
                 )
-                available_tenants.append({
-                    "id": str(tenant.id),
-                    "name": tenant.name,
-                    "slug": tenant.slug,
-                    "schema_name": tenant.schema_name,
-                    "roles": [],
-                    "permissions": [],
-                    "is_current": tenant.id == current_tenant.id,
-                })
-        
-        # Log successful attempt (runs in public schema)
+
+
+                available_tenants.append(
+                    {
+                        "id": str(tenant.id),
+
+                        "name": tenant.name,
+
+                        "slug": tenant.slug,
+
+                        "schema_name":
+                            tenant.schema_name,
+
+                        "roles": [],
+
+                        "permissions": [],
+
+                        "is_current":
+                            tenant.id ==
+                            current_tenant.id,
+                    }
+                )
+
+
+
+        # ==========================================================
+        # STEP 8
+        # Login audit
+        # ==========================================================
+
         LoginAttempt.objects.create(
             user=user,
             email=email,
             tenant_slug=current_tenant.slug,
             status=LoginAttempt.SUCCESS,
             ip_address=ip_address,
-            user_agent=user_agent or '',
+            user_agent=user_agent or "",
         )
-        
-        # Update user's last login
+
+
         user.last_login = timezone.now()
-        user.save(update_fields=['last_login'])
-        
+
+        user.save(
+            update_fields=[
+                "last_login"
+            ]
+        )
+
+
+
+        # ==========================================================
+        # STEP 9
+        # Response
+        # ==========================================================
+
         return {
+
             "user": {
+
                 "id": str(user.id),
+
                 "email": user.email,
-                "is_verified": user.is_verified,
-                "is_active": user.is_active,
-                "last_login": user.last_login.isoformat() if user.last_login else None,
+
+                "is_verified":
+                    user.is_verified,
+
+                "is_active":
+                    user.is_active,
+
+                "last_login":
+                    (
+                        user.last_login.isoformat()
+                        if user.last_login
+                        else None
+                    ),
             },
+
+
             "current_tenant": {
-                "id": str(current_tenant.id),
-                "name": current_tenant.name,
-                "slug": current_tenant.slug,
-                "schema_name": current_tenant.schema_name,
+
+                "id":
+                    str(current_tenant.id),
+
+                "name":
+                    current_tenant.name,
+
+                "slug":
+                    current_tenant.slug,
+
+                "schema_name":
+                    current_tenant.schema_name,
             },
-            "available_tenants": available_tenants,
-            "roles": roles_data,
-            "permissions": permissions_data["permissions"],
-            "tokens": tokens,
+
+
+            "available_tenants":
+                available_tenants,
+
+
+            "roles":
+                roles_data,
+
+
+            "permissions":
+                permissions_data.get(
+                    "permissions",
+                    []
+                ),
+
+
+            "tokens":
+                tokens,
         }
     
     @staticmethod

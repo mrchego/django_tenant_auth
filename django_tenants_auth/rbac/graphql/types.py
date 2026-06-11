@@ -52,11 +52,22 @@ class UserPermissionsType:
 @strawberry.type
 class UserRoleInfoType:
     id: strawberry.ID
+
     role_id: strawberry.ID
+
     role_name: str
+
     role_slug: str
+
+    description: Optional[str]
+
+    is_system_role: bool
+
     assigned_by: Optional[str]
+
     assigned_at: str
+
+    is_active: bool
     
 @strawberry.type
 class PermissionGroupEntryType:
