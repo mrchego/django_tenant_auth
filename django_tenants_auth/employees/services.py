@@ -248,30 +248,80 @@ class EmployeeService:
             ),
         }
 
+    
+
+
     @staticmethod
     def update_employee(
         *,
         tenant: Tenant,
         employee_id: str,
+        updated_by: Optional[User] = None,
         **fields,
     ) -> Dict[str, Any]:
-        """Update employee fields."""
+        """
+        Update employee fields safely inside tenant schema.
+        """
+
         with schema_context(tenant.schema_name):
-            employee = Employee.objects.get(id=employee_id)
 
-            # Handle department separately
-            department_id = fields.pop("department_id", None)
-            if department_id:
-                employee.department = Department.objects.get(id=department_id)
+            with db_transaction.atomic():
 
-            # Update other fields
-            for field, value in fields.items():
-                if hasattr(employee, field) and value is not None:
-                    setattr(employee, field, value)
+                employee = Employee.objects.select_related(
+                    "department",
+                    "user",
+                ).get(id=employee_id)
 
-            employee.save()
+                # ======================================================
+                # STEP 1: Handle department separately
+                # ======================================================
+                department_id = fields.pop("department_id", None)
 
-            return {"employee": EmployeeService._map_employee_to_type(employee)}
+                if department_id is not None:
+                    employee.department = Department.objects.get(
+                        id=department_id
+                    )
+
+                # ======================================================
+                # STEP 2: Update safe fields only
+                # ======================================================
+                allowed_fields = {
+                    "name",
+                    "designation",
+                    "salary",
+                    "commission",
+                    "mobile_number",
+                    "birth_date",
+                    "gender",
+                    "blood_group",
+                    "religion",
+                    "appointment_date",
+                    "joining_date",
+                    "address",
+                    "image_path",
+                    "status",
+                    "emp_id",
+                }
+
+                for field, value in fields.items():
+
+                    if field in allowed_fields and value is not None:
+                        setattr(employee, field, value)
+
+                # ======================================================
+                # STEP 3: Audit (optional but recommended)
+                # ======================================================
+                if updated_by:
+                    employee.updated_by = updated_by
+
+                employee.save()
+
+                # ======================================================
+                # STEP 4: Return clean response
+                # ======================================================
+                return {
+                    "employee": employee
+                }
 
     @staticmethod
     def update_employee_login(
@@ -282,85 +332,248 @@ class EmployeeService:
         email: Optional[str] = None,
         password: Optional[str] = None,
         role_id: Optional[str] = None,
+        updated_by: Optional[User] = None,
     ) -> Dict[str, Any]:
-        """Update employee login status."""
-        # Fetch employee (public schema – model is in tenant, but we need tenant context later)
-        # Actually, Employee lives in tenant schema, so we must fetch inside tenant context.
-        # We'll handle it in two parts.
+        """
+        Enable or disable employee login and manage tenant RBAC safely.
+        """
+
+        new_user = None
+
+        # ==========================================================
+        # STEP 1
+        # FETCH EMPLOYEE (TENANT SCHEMA)
+        # ==========================================================
         with schema_context(tenant.schema_name):
-            employee = Employee.objects.get(id=employee_id)
-            current_user = employee.user
 
-        if allow_login and not current_user:
-            # ========= Public schema: create user =========
-            user = User.objects.create_user(
-                email=email,
-                password=password,
-                is_active=True,
+            employee = Employee.objects.select_related("user").get(
+                id=employee_id
             )
-            user.is_verified = True
-            user.save(update_fields=["is_verified"])
-            tenant.add_user(user)
 
-            # ========= Tenant schema: link user, assign role =========
-            with schema_context(tenant.schema_name):
-                employee = Employee.objects.get(id=employee_id)
-                employee.user = user
+            existing_user = employee.user
+
+
+        # ==========================================================
+        # STEP 2
+        # ENABLE LOGIN → CREATE OR REUSE USER (PUBLIC SCHEMA)
+        # ==========================================================
+        if allow_login:
+
+            if not email or not password:
+                raise ValueError(
+                    "Email and password required when enabling login"
+                )
+
+            with schema_context("public"):
+
+                # Try existing user
+                new_user = User.objects.filter(email=email).first()
+
+                if new_user:
+
+                    if not new_user.is_active:
+                        new_user.is_active = True
+
+                    if not new_user.is_verified:
+                        new_user.is_verified = True
+
+                    new_user.save(
+                        update_fields=["is_active", "is_verified"]
+                    )
+
+                else:
+
+                    new_user = User.objects.create_user(
+                        email=email,
+                        password=password,
+                        is_active=True,
+                    )
+
+                    new_user.is_verified = True
+                    new_user.save(update_fields=["is_verified"])
+
+                # Ensure tenant membership
+                if not new_user.tenants.filter(pk=tenant.pk).exists():
+                    tenant.add_user(new_user)
+
+
+        # ==========================================================
+        # STEP 3
+        # UPDATE EMPLOYEE + RBAC (TENANT SCHEMA)
+        # ==========================================================
+        with schema_context(tenant.schema_name):
+
+            employee = Employee.objects.get(id=employee_id)
+
+            # ---------------------------
+            # ENABLE LOGIN
+            # ---------------------------
+            if allow_login:
+
+                employee.user = new_user
                 employee.save(update_fields=["user"])
+
+                # Assign role if provided
                 if role_id:
+
                     from django_tenants_auth.rbac.models import Role
 
                     role = Role.objects.get(id=role_id)
-                    RBACService.assign_role_to_user(user=user, role=role)
+
+                    RBACService.assign_role_to_user(
+                        user=new_user,
+                        role=role,
+                        assigned_by=updated_by,
+                    )
+
                 return {
                     "employee": {
                         "id": str(employee.id),
                         "has_login": True,
+                        "user_id": str(new_user.id),
                     }
                 }
-        elif not allow_login and current_user:
-            # Deactivate user (public schema)
-            current_user.is_active = False
-            current_user.save(update_fields=["is_active"])
-            with schema_context(tenant.schema_name):
-                employee = Employee.objects.get(id=employee_id)
+
+            # ---------------------------
+            # DISABLE LOGIN
+            # ---------------------------
+            else:
+
+                # If employee has a user → deactivate
+                if existing_user:
+
+                    with schema_context("public"):
+                        existing_user.is_active = False
+                        existing_user.save(update_fields=["is_active"])
+
                 employee.user = None
                 employee.save(update_fields=["user"])
+
                 return {
                     "employee": {
                         "id": str(employee.id),
                         "has_login": False,
                     }
                 }
-        else:
-            # No change
-            with schema_context(tenant.schema_name):
-                employee = Employee.objects.get(id=employee_id)
-                return {
-                    "employee": {
-                        "id": str(employee.id),
-                        "has_login": employee.user is not None
-                        and employee.user.is_active,
-                    }
-                }
+
+
+        # ==========================================================
+        # STEP 4
+        # FALLBACK (SHOULD NOT REACH HERE)
+        # ==========================================================
+        return {
+            "employee": {
+                "id": str(employee_id),
+                "has_login": False,
+            }
+        }
 
     @staticmethod
     def delete_employee(
         *,
         tenant: Tenant,
         employee_id: str,
-    ) -> bool:
-        """Delete an employee."""
+        deleted_by: Optional[User] = None,
+    ) -> Dict[str, Any]:
+        """
+        Delete employee safely.
+
+        Steps:
+        1. Find employee in tenant schema
+        2. Capture linked public user
+        3. Remove tenant RBAC
+        4. Delete employee
+        5. Deactivate user if no longer used
+        """
+
+        user = None
+
+
+        # ==========================================================
+        # STEP 1
+        # Tenant schema operations
+        # ==========================================================
+
         with schema_context(tenant.schema_name):
-            employee = Employee.objects.get(id=employee_id)
 
-            # Deactivate associated user if exists
-            if employee.user:
-                employee.user.is_active = False
-                employee.user.save()
+            with db_transaction.atomic():
 
-            employee.delete()
-            return True
+                employee = (
+                    Employee.objects
+                    .select_related("user")
+                    .get(id=employee_id)
+                )
+
+
+                user = employee.user
+
+
+                # ==================================================
+                # Remove RBAC assignments
+                # ==================================================
+
+                if user:
+
+                    from django_tenants_auth.rbac.models import UserRole
+
+
+                    UserRole.objects.filter(
+                        user=user
+                    ).delete()
+
+
+
+                # ==================================================
+                # Delete employee
+                # ==================================================
+
+                employee.delete()
+
+
+
+        # ==========================================================
+        # STEP 2
+        # Public schema user cleanup
+        # ==========================================================
+
+        if user:
+
+            with schema_context("public"):
+
+                # Check if user belongs to other employees
+                still_used = False
+
+
+                for user_tenant in user.tenants.all():
+
+                    with schema_context(
+                        user_tenant.schema_name
+                    ):
+
+                        if Employee.objects.filter(
+                            user=user
+                        ).exists():
+
+                            still_used = True
+                            break
+
+
+
+                if not still_used:
+
+                    user.is_active = False
+
+                    user.save(
+                        update_fields=[
+                            "is_active"
+                        ]
+                    )
+
+
+        return {
+            "employee_id": str(employee_id),
+            "deleted": True,
+        }
 
     @staticmethod
     def bulk_update_status(

@@ -6,6 +6,7 @@ from django_tenants_auth.authentication.decorators import login_required
 from django_tenants_auth.employees.services import EmployeeService
 from django_tenants_auth.employees.graphql.types import (
     EmployeeCreateInput,
+    EmployeeType,
     EmployeeUpdateInput,
     EmployeeLoginUpdateInput,
     CreateEmployeeResponse,
@@ -82,29 +83,41 @@ class EmployeeMutation:
     def update_employee(
         self,
         info: Info,
-        employee_id: strawberry.ID,
         input: EmployeeUpdateInput,
     ) -> UpdateEmployeeResponse:
-        """
-        Update an existing employee's information.
-        """
         try:
             tenant = info.context.request.tenant
-            
+            updated_by = info.context.request.user
+
+            # Build dict of only provided (non-None) fields
+            data = {
+                field: value
+                for field, value in input.__dict__.items()
+                if value is not None
+            }
+
+            employee_id = data.pop("employee_id")
+
             result = EmployeeService.update_employee(
                 tenant=tenant,
                 employee_id=str(employee_id),
-                **{k: v for k, v in input.__dict__.items() if v is not None}
+                updated_by=updated_by,
+                **data
             )
-            
+
+            # Use the service's built-in mapper to create the full EmployeeType
+            employee_type = EmployeeService._map_employee_to_type(result["employee"])
+
             return UpdateEmployeeResponse(
                 success=True,
-                employee=result.get("employee"),
+                employee=employee_type,
                 message="Employee updated successfully"
             )
+
         except Exception as e:
             return UpdateEmployeeResponse(
                 success=False,
+                employee=None,
                 message=f"Failed to update employee: {str(e)}"
             )
     
@@ -155,22 +168,33 @@ class EmployeeMutation:
     ) -> DeleteEmployeeResponse:
         """
         Delete an employee.
-        
-        This will also deactivate the associated user account if exists.
+
+        Removes employee from tenant schema,
+        cleans RBAC,
+        and safely deactivates unused user accounts.
         """
+
         try:
+
             tenant = info.context.request.tenant
-            
+            deleted_by = info.context.request.user
+
+
             EmployeeService.delete_employee(
                 tenant=tenant,
                 employee_id=str(employee_id),
+                deleted_by=deleted_by,
             )
-            
+
+
             return DeleteEmployeeResponse(
                 success=True,
                 message="Employee deleted successfully"
             )
+
+
         except Exception as e:
+
             return DeleteEmployeeResponse(
                 success=False,
                 message=f"Failed to delete employee: {str(e)}"

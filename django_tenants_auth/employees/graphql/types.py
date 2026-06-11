@@ -125,6 +125,7 @@ class EmployeeCreateInput:
 @strawberry.input
 class EmployeeUpdateInput:
     """Input type for updating employees."""
+    employee_id: strawberry.ID
     name: Optional[str] = None
     department_id: Optional[strawberry.ID] = None
     designation: Optional[str] = None
